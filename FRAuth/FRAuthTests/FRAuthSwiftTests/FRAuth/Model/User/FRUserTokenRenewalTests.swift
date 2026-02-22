@@ -622,7 +622,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
     }
     
     
-    func test_14_FRUser_GetAccessToken_RefreshToken_SSOToken_Expired_UserAuthenticationRequired() {
+    func test_14_FRUser_GetAccessToken_RefreshToken_InvalidGrant_SSOToken_Expired() {
         
         // Start SDK
         self.startSDK()
@@ -646,7 +646,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
             return
         }
         
-        // Expire access_token to enforce refresh_token grant which will fail with other than OAuth2Error.invalidGrant
+        // Expire access_token to enforce refresh_token grant which will fail with OAuth2Error.invalidGrant
         at1.expiresIn = 0
         if let tokenManager = self.config.tokenManager {
             try? tokenManager.persist(token: at1)
@@ -657,12 +657,12 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
             XCTAssertNotNil(error)
             XCTAssertNil(user)
             
-            if let authError = error as? AuthError {
-                switch authError {
-                case .userAuthenticationRequired:
+            if let oAuth2Error = error as? OAuth2Error {
+                switch oAuth2Error {
+                case .invalidGrant:
                     break
                 default:
-                    XCTFail("Failed with unexpected error: \(authError.localizedDescription)")
+                    XCTFail("Failed with unexpected error: \(oAuth2Error.localizedDescription)")
                     break
                 }
             }
@@ -799,7 +799,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
     }
     
     
-    func test_18_FRUser_GetAccessToken_RefreshToken_SSOToken_Expired_UserAuthenticationRequired_Async() {
+    func test_18_FRUser_GetAccessToken_RefreshToken_InvalidGrant_SSOToken_Expired_Async() {
         
         // Start SDK
         self.startSDK()
@@ -823,7 +823,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
             return
         }
         
-        // Expire access_token to enforce refresh_token grant which will fail with other than OAuth2Error.invalidGrant
+        // Expire access_token to enforce refresh_token grant which will fail with OAuth2Error.invalidGrant
         at1.expiresIn = 0
         if let tokenManager = self.config.tokenManager {
             try? tokenManager.persist(token: at1)
@@ -834,7 +834,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
             let newUser = try user.getAccessToken()
             XCTAssertNil(newUser)
         }
-        catch AuthError.userAuthenticationRequired {
+        catch OAuth2Error.invalidGrant {
         }
         catch {
             XCTFail("Failed with unexpected error: \(error.localizedDescription)")
@@ -970,7 +970,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
     }
     
     
-    func test_22_FRUser_Refresh_RefreshToken_SSOToken_Expired_UserAuthenticationRequired() {
+    func test_22_FRUser_Refresh_RefreshToken_InvalidGrant_SSOToken_Expired() {
         
         // Start SDK
         self.startSDK()
@@ -993,17 +993,17 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
             return
         }
         
-        let ex = self.expectation(description: "Get Access Token")
+        let ex = self.expectation(description: "Refresh User")
         user.refresh { (user, error) in
             XCTAssertNotNil(error)
             XCTAssertNil(user)
             
-            if let authError = error as? AuthError {
-                switch authError {
-                case .userAuthenticationRequired:
+            if let oAuth2Error = error as? OAuth2Error {
+                switch oAuth2Error {
+                case .invalidGrant:
                     break
                 default:
-                    XCTFail("Failed with unexpected error: \(authError.localizedDescription)")
+                    XCTFail("Failed with unexpected error: \(oAuth2Error.localizedDescription)")
                     break
                 }
             }
@@ -1120,7 +1120,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
     }
     
     
-    func test_26_FRUser_Refresh_RefreshToken_SSOToken_Expired_UserAuthenticationRequired_Async() {
+    func test_26_FRUser_Refresh_RefreshToken_InvalidGrant_SSOToken_Expired_Async() {
         
         // Start SDK
         self.startSDK()
@@ -1148,7 +1148,7 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
             let newUser = try user.refreshSync()
             XCTAssertNil(newUser)
         }
-        catch AuthError.userAuthenticationRequired {
+        catch OAuth2Error.invalidGrant {
         }
         catch {
             XCTFail("Failed with unexpected error: \(error.localizedDescription)")

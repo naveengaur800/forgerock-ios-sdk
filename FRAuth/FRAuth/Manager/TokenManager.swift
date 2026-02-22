@@ -448,12 +448,45 @@ struct TokenManager {
                 if let tokenError = refreshError as? TokenError, case .nullRefreshToken = tokenError {
                     FRLog.w("No refresh_token found; exchanging SSO Token for OAuth2 tokens")
                 } else if let oAuthError = refreshError as? OAuth2Error, case .invalidGrant = oAuthError {
-                    FRLog.w("refresh_token grant failed; exchanging SSO Token for OAuth2 tokens")
+                    FRLog.w("refresh_token grant failed with invalid_grant; exchanging SSO Token for OAuth2 tokens")
+                    self.refreshUsingSSOTokenPreservingInvalidGrant(originalError: oAuthError, completion: completion)
+                    return
                 }
                 self.refreshUsingSSOToken(completion: completion)
                 return
             }
             completion(refreshedToken, refreshError)
+        }
+    }
+
+
+    /// Preserve `OAuth2Error.invalidGrant` through an SSO token exchange fallback.
+    ///
+    /// Delegate to `refreshUsingSSOToken(completion:)` and return new tokens on success.
+    /// If SSO fallback fails, return the original `invalidGrant` rather than the fallback error type.
+    ///
+    /// The `invalid_grant` error represents a revoked or expired refresh token and is intentionally
+    /// surfaced as a distinct signal for app-level session handling. Credential cleanup remains owned by
+    /// `refreshUsingSSOToken(completion:)` according to its existing implementation.
+    ///
+    /// - Parameters:
+    ///   - originalError: The `OAuth2Error.invalidGrant` that triggered the SSO fallback.
+    ///   - completion: Callback delivering the renewed token or the preserved error.
+    private func refreshUsingSSOTokenPreservingInvalidGrant(
+        originalError: OAuth2Error,
+        completion: @escaping TokenCompletionCallback
+    ) {
+        self.refreshUsingSSOToken { (token, ssoError) in
+            guard token == nil else {
+                completion(token, nil)
+                return
+            }
+
+            if let ssoError = ssoError {
+                FRLog.w("SSO fallback failed after invalid_grant: \(ssoError.localizedDescription). Preserving original invalid_grant.")
+            }
+
+            completion(nil, originalError)
         }
     }
 }
