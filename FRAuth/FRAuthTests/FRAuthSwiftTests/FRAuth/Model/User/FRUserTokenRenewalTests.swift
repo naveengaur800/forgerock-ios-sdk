@@ -1316,5 +1316,134 @@ class FRUserTokenRenewalTests: FRAuthBaseTest {
             XCTFail("Failed with unexpected error: \(error.localizedDescription)")
         }
     }
-    
+
+    func test_31_FRUser_GetAccessToken_RefreshTokenGrant_TransientFailure_DoesNotFallbackToSSO() {
+
+        // Start SDK
+        self.startSDK()
+
+        // Perform login first
+        self.performLogin()
+
+        // Load mock responses for refresh token failure and an extra response to detect unwanted fallback calls
+        self.loadMockResponses(["OAuth2_EndSession_Failure", "OAuth2_AuthorizeRedirect_Failure"])
+
+        // Validate FRUser.currentUser
+        guard let user = FRUser.currentUser else {
+            XCTFail("Failed to perform user login")
+            return
+        }
+
+        // Expire access_token to enforce refresh_token grant
+        guard let at1 = user.token else {
+            XCTFail("Failed to fetch AccessToken")
+            return
+        }
+        at1.expiresIn = 0
+
+        if let tokenManager = self.config.tokenManager {
+            try? tokenManager.persist(token: at1)
+        }
+
+        let ex = self.expectation(description: "Get Access Token")
+        user.getAccessToken { (user, error) in
+            XCTAssertNil(user)
+            XCTAssertNotNil(error)
+
+            if let authApiError = error as? AuthApiError {
+                switch authApiError {
+                case .apiRequestFailure:
+                    break
+                default:
+                    XCTFail("Failed with unexpected error: \(authApiError.localizedDescription)")
+                }
+            }
+            else {
+                XCTFail("Failed with unexpected error: \(error?.localizedDescription ?? "")")
+            }
+
+            ex.fulfill()
+        }
+        waitForExpectations(timeout: 60, handler: nil)
+
+        // Ensure transient refresh error does not trigger /authorize fallback.
+        XCTAssertEqual(self.actionHistory.filter { $0.type == "REFRESH_TOKEN" }.count, 1)
+        XCTAssertEqual(self.actionHistory.filter { $0.type == "AUTHORIZE" }.count, 0)
+
+        if let keychainManager = FRAuth.shared?.keychainManager {
+            XCTAssertNotNil(try? keychainManager.getAccessToken())
+            XCTAssertNotNil(keychainManager.getSSOToken())
+        }
+        else {
+            XCTFail("Failed to retrieve KeychainManager")
+        }
+    }
+
+    func test_32_FRUser_GetAccessToken_RefreshTokenGrant_TransientFailure_PreservesOriginalErrorWithoutSSOToken() {
+
+        // Start SDK
+        self.startSDK()
+
+        // Perform login first
+        self.performLogin()
+
+        // Load mock response for refresh token transient failure
+        self.loadMockResponses(["OAuth2_EndSession_Failure"])
+
+        // Validate FRUser.currentUser
+        guard let user = FRUser.currentUser else {
+            XCTFail("Failed to perform user login")
+            return
+        }
+
+        // Expire access_token to enforce refresh_token grant
+        guard let at1 = user.token else {
+            XCTFail("Failed to fetch AccessToken")
+            return
+        }
+        at1.expiresIn = 0
+
+        if let tokenManager = self.config.tokenManager {
+            try? tokenManager.persist(token: at1)
+        }
+
+        // Simulate the case where only refresh_token is available.
+        FRAuth.shared?.keychainManager.setSSOToken(ssoToken: nil)
+
+        let ex = self.expectation(description: "Get Access Token")
+        user.getAccessToken { (user, error) in
+            XCTAssertNil(user)
+            XCTAssertNotNil(error)
+
+            XCTAssertFalse(error is TokenError)
+
+            if let authApiError = error as? AuthApiError {
+                switch authApiError {
+                case .apiRequestFailure:
+                    break
+                default:
+                    XCTFail("Failed with unexpected error: \(authApiError.localizedDescription)")
+                }
+            }
+            else {
+                XCTFail("Failed with unexpected error: \(error?.localizedDescription ?? "")")
+            }
+
+            ex.fulfill()
+        }
+        waitForExpectations(timeout: 60, handler: nil)
+
+        // Ensure transient refresh error does not trigger /authorize fallback.
+        XCTAssertEqual(self.actionHistory.filter { $0.type == "REFRESH_TOKEN" }.count, 1)
+        XCTAssertEqual(self.actionHistory.filter { $0.type == "AUTHORIZE" }.count, 0)
+
+        if let keychainManager = FRAuth.shared?.keychainManager {
+            XCTAssertNotNil(try? keychainManager.getAccessToken())
+            XCTAssertNil(keychainManager.getSSOToken())
+        }
+        else {
+            XCTFail("Failed to retrieve KeychainManager")
+        }
+    }
+
 }

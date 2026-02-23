@@ -51,7 +51,7 @@ struct TokenManager {
             if let validToken = token {
                 if validToken.willExpireIn(threshold: self.oAuth2Client.threshold) {
                     // Token is about to expire, so attempt to refresh it.
-                    self._handleRefreshToken(token: validToken, completion: completion)
+                    self.handleRefreshToken(token: validToken, completion: completion)
                 } else {
                     // Token is valid and not expiring. Return it directly.
                     FRLog.v("Access token is still valid; returning existing token.")
@@ -127,7 +127,7 @@ struct TokenManager {
             
             if let token = token {
                 // A valid token was found, so proceed to refresh it.
-                self._handleRefreshToken(token: token, completion: completion)
+                self.handleRefreshToken(token: token, completion: completion)
             }
             else {
                 // retrieveToken returned nil, meaning no token was stored.
@@ -253,32 +253,35 @@ struct TokenManager {
     /// Renews OAuth 2 token(s) with SSO token
     /// - Parameter completion: Completion callback to notify the result
     func refreshUsingSSOToken(completion: @escaping TokenCompletionCallback) {
-        if let ssoToken = self.keychainManager.getSSOToken() {
-            self.oAuth2Client.exchangeToken(token: ssoToken) { (token, error) in
-                do {
-                    if error is OAuth2Error || error is AuthApiError {
-                        FRLog.i("OAuth2Error or AuthApiError received while /authorize flow with SSO Token; no more valid credentials and user authentication is required.")
-                        FRLog.w("Removing all credentials and state")
-                        self.clearCredentials()
-                        completion(nil, AuthError.userAuthenticationRequired)
-                    }
-                    else {
-                        if error == nil {
-                            try self.keychainManager.setAccessToken(token: token)
-                        }
-                        completion(token, error)
-                    }
-                }
-                catch {
-                    FRLog.e("Unexpected error captured during /authorize flow with SSO Token - \(error.localizedDescription)")
-                    self.clearCredentials()
-                    completion(nil, error)
-                }
-            }
-        }
-        else {
+        guard let ssoToken = self.keychainManager.getSSOToken() else {
             self.clearCredentials()
             completion(nil, TokenError.nullToken)
+            return
+        }
+
+        self.oAuth2Client.exchangeToken(token: ssoToken) { (token, error) in
+            if let error = error {
+                if self.shouldRequireUserAuthentication(error) {
+                    FRLog.i("Terminal OAuth2 error received while /authorize flow with SSO Token; no more valid credentials and user authentication is required.")
+                    FRLog.w("Removing all credentials and state")
+                    self.clearCredentials()
+                    completion(nil, AuthError.userAuthenticationRequired)
+                }
+                else {
+                    FRLog.w("Transient error during /authorize flow with SSO Token; preserving credentials for retry - \(error.localizedDescription)")
+                    completion(nil, error)
+                }
+                return
+            }
+
+            do {
+                try self.keychainManager.setAccessToken(token: token)
+                completion(token, nil)
+            }
+            catch {
+                FRLog.e("Unexpected error during /authorize flow with SSO Token - \(error.localizedDescription)")
+                completion(nil, error)
+            }
         }
     }
     
@@ -442,18 +445,110 @@ struct TokenManager {
     // MARK: - Private Refactoring Helpers
     
     /// Private helper to manage the refresh-token grant and its specific fallback logic.
-    private func _handleRefreshToken(token: AccessToken, completion: @escaping TokenCompletionCallback) {
+    private func handleRefreshToken(token: AccessToken, completion: @escaping TokenCompletionCallback) {
         self.refreshUsingRefreshToken(token: token) { (refreshedToken, refreshError) in
-            guard let refreshedToken = refreshedToken else {
-                if let tokenError = refreshError as? TokenError, case .nullRefreshToken = tokenError {
-                    FRLog.w("No refresh_token found; exchanging SSO Token for OAuth2 tokens")
-                } else if let oAuthError = refreshError as? OAuth2Error, case .invalidGrant = oAuthError {
-                    FRLog.w("refresh_token grant failed; exchanging SSO Token for OAuth2 tokens")
-                }
-                self.refreshUsingSSOToken(completion: completion)
+            if let refreshedToken = refreshedToken {
+                completion(refreshedToken, refreshError)
                 return
             }
-            completion(refreshedToken, refreshError)
+
+            guard let refreshError = refreshError else {
+                completion(nil, TokenError.nullToken)
+                return
+            }
+
+            if !self.shouldFallbackToSSOToken(refreshError) {
+                completion(nil, refreshError)
+                return
+            }
+
+            self.logSSOTokenFallbackReason(for: refreshError)
+
+            self.refreshUsingSSOToken { (ssoTokenRefreshed, ssoTokenError) in
+                if let ssoTokenRefreshed = ssoTokenRefreshed {
+                    completion(ssoTokenRefreshed, nil)
+                    return
+                }
+
+                // Preserve the original refresh error for OAuth/network failures when SSO fallback is unavailable.
+                if let ssoTokenError = ssoTokenError, self.shouldPreserveOriginalRefreshError(refreshError, whenSSOTokenErrorIs: ssoTokenError) {
+                    completion(nil, refreshError)
+                    return
+                }
+
+                completion(nil, ssoTokenError ?? refreshError)
+            }
+        }
+    }
+
+    /// Evaluates whether a refresh-token grant failure should fall back to SSO token exchange.
+    ///
+    /// Only `TokenError.nullRefreshToken` (no refresh token available) and
+    /// `OAuth2Error.invalidGrant` (refresh token expired/revoked) should trigger SSO fallback.
+    /// Other errors (for example transient server/network errors or client configuration issues)
+    /// should be returned directly without forcing an SSO exchange.
+    ///
+    /// - Returns: `true` when SSO fallback is appropriate.
+    private func shouldFallbackToSSOToken(_ error: Error) -> Bool {
+        if case .nullRefreshToken = error as? TokenError {
+            return true
+        }
+
+        if case .invalidGrant = error as? OAuth2Error {
+            return true
+        }
+
+        return false
+    }
+
+    /// Evaluates whether an SSO token exchange error should force user re-authentication.
+    ///
+    /// Terminal errors:
+    /// - OAuth2 protocol errors (for example invalid client/grant)
+    /// - Auth API failures that can be converted to OAuth2 errors
+    ///
+    /// Transient errors (for example network-level failures) are not treated as terminal and
+    /// should preserve credentials for retry.
+    ///
+    /// - Returns: `true` when local credentials should be cleared and login is required.
+    private func shouldRequireUserAuthentication(_ error: Error) -> Bool {
+        if error is OAuth2Error {
+            return true
+        }
+
+        if let apiError = error as? AuthApiError, apiError.convertToOAuth2Error() != nil {
+            return true
+        }
+
+        return false
+    }
+
+    /// Determines whether the original refresh error should be surfaced when SSO fallback fails.
+    ///
+    /// This prevents replacing a meaningful refresh error (for example transient server failure)
+    /// with `TokenError.nullToken` when SSO fallback fails only because there is no SSO token.
+    ///
+    /// - Returns: `true` when the original refresh error should be returned instead of SSO fallback error.
+    private func shouldPreserveOriginalRefreshError(_ refreshError: Error, whenSSOTokenErrorIs ssoTokenError: Error) -> Bool {
+        guard case .nullToken = ssoTokenError as? TokenError else {
+            return false
+        }
+
+        // Keep nullRefreshToken behavior unchanged for backwards compatibility.
+        if case .nullRefreshToken = refreshError as? TokenError {
+            return false
+        }
+
+        return true
+    }
+
+    /// Logs the specific reason why refresh-token flow is falling back to SSO token flow.
+    private func logSSOTokenFallbackReason(for refreshError: Error) {
+        if case .nullRefreshToken = refreshError as? TokenError {
+            FRLog.w("No refresh_token found; exchanging SSO Token for OAuth2 tokens")
+        }
+        else if case .invalidGrant = refreshError as? OAuth2Error {
+            FRLog.w("refresh_token grant failed; exchanging SSO Token for OAuth2 tokens")
         }
     }
 }
